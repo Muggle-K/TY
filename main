@@ -1,0 +1,154 @@
+## 主程序
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+from utils import load_data, organize_data, distance, plot_path
+from normalize import norm
+from net import myDataset, myModel
+
+import copy
+import numpy as np
+import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+import torch.utils.data as Data
+
+
+long = 16 #长度小于long的台风数据弃用
+filename = 'D:/typhoon/BSTdata_sub1.txt'
+data = load_data(filename, long)
+typhoon = copy.deepcopy(data)
+
+#plot_path(data, 0, 3)    
+#pyplot.savefig('E:/台风实践/2006-2010.pdf')
+
+# 归一化
+maxdata, mindata, ty_train, ty_test = norm(typhoon, divide_id=289)
+
+# 组织样本
+sequence_length = 5
+train_n = organize_data(ty_train, sequence_length)
+test_n = organize_data(ty_test, sequence_length)
+
+# 网络输入输出
+X = train_n[:, :sequence_length, :]
+Y = train_n[:, sequence_length+3, 2:4]
+X_test = test_n[:, :sequence_length, :]
+Y_test = test_n[:, sequence_length+3, 2:4]
+
+# 训练集真值
+Y_true = np.zeros_like(Y)
+for i in range(Y.shape[0]):
+    Y_true[i][0] = Y[i][0] * (maxdata[0, 1] - mindata[0, 1]) + mindata[0, 1]
+    Y_true[i][1] = Y[i][1] * (maxdata[0, 2] - mindata[0, 2]) + mindata[0, 2]
+# 测试集真值
+Y_test_true = np.zeros_like(Y_test)
+for i in range(Y_test.shape[0]):
+    Y_test_true[i][0] = Y_test[i][0] * (maxdata[0, 1] - mindata[0, 1]) + mindata[0, 1]
+    Y_test_true[i][1] = Y_test[i][1] * (maxdata[0, 2] - mindata[0, 2]) + mindata[0, 2]
+
+
+################################   LSTM   #####################################
+use_cuda = torch.cuda.is_available()
+device = torch.device('cuda' if use_cuda else 'cpu') 
+
+torch.set_default_tensor_type('torch.DoubleTensor')
+        
+# 数据集
+dataset_train = myDataset(input_data=X[:, :, 1:4], output_data=Y)
+dataset_test = myDataset(input_data=X_test[:, :, 1:4], output_data=Y_test)
+
+# 加载数据集
+dataloader_train = Data.DataLoader(dataset=dataset_train, batch_size=50, shuffle=False, drop_last=False)
+dataloader_val = Data.DataLoader(dataset=dataset_train, batch_size=1, shuffle=False)
+dataloader_test = Data.DataLoader(dataset=dataset_test, batch_size=1, shuffle=False)
+
+# 模型    
+model = myModel(feature_num=3, hidden_units=256).double().to(device)
+print(model)        
+
+# 优化器
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+# 损失函数
+loss_function = nn.L1Loss()
+
+# 训练测试
+distance_train = list()
+distance_test = list()
+epoch_num = 160
+for epoch in range(epoch_num):
+    loss_total = 0
+    for iteration, sample in enumerate(dataloader_train):
+        x = sample['x'].requires_grad_().to(device)
+        y = sample['y'].requires_grad_().to(device)
+        optimizer.zero_grad()
+        out = model(x)
+        loss = loss_function(out, y)
+        loss.backward()
+        optimizer.step()
+        loss_total += loss.item()
+        
+        if (iteration+1) % 50 == 0 or (iteration+1) == len(dataloader_train):
+            print('==>>> Epoch: [{}/{}]  |  Iteration: {}  |  Train_loss_batch: {:.6f}'.format\
+                  (epoch+1, epoch_num, iteration+1, loss.item()))
+    
+    print('')
+    print('>>>>> Epoch{} has finished, train_loss_average is {:.6f}.'.format(epoch+1, loss_total/(len(dataloader_train))))
+        
+    #一个epoch验证一次训练集
+    error_train = list()
+    with torch.no_grad():
+        for iteration, sample in enumerate(dataloader_val):
+            x = sample['x'].to(device)
+            y = sample['y'].to(device)
+            pre = model(x) #对于单个样本，输出pre为torch.Size([1, 2])
+            pre_lat = pre[0,0].item()
+            pre_lon = pre[0,1].item()
+            true_lat = y[0,0].item()
+            true_lon = y[0,1].item()
+            pre_lat = pre_lat * (maxdata[0,1]-mindata[0,1]) + mindata[0,1]
+            true_lat = true_lat * (maxdata[0,1]-mindata[0,1]) + mindata[0,1]
+            pre_lon = pre_lon * (maxdata[0,2]-mindata[0,2]) + mindata[0,2]
+            true_lon = true_lon * (maxdata[0,2]-mindata[0,2]) + mindata[0,2]
+            error = distance(pre_lat, pre_lon, true_lat, true_lon)
+            error_train.append(error)
+    print('>>>>> Epoch{} has finished, error_24h_train is {:.6f}.'.format(epoch+1, sum(error_train)/len(error_train)))
+    
+    #一个epoch测试一次
+    error_test = list()
+    with torch.no_grad():
+        for iteration, sample in enumerate(dataloader_test):
+            x = sample['x'].to(device)
+            y = sample['y'].to(device)
+            pre = model(x) #对于单个样本，输出pre为torch.Size([1, 2])
+            pre_lat = pre[0,0].item()
+            pre_lon = pre[0,1].item()
+            true_lat = y[0,0].item()
+            true_lon = y[0,1].item()
+            pre_lat = pre_lat * (maxdata[0,1]-mindata[0,1]) + mindata[0,1]
+            true_lat = true_lat * (maxdata[0,1]-mindata[0,1]) + mindata[0,1]
+            pre_lon = pre_lon * (maxdata[0,2]-mindata[0,2]) + mindata[0,2]
+            true_lon = true_lon * (maxdata[0,2]-mindata[0,2]) + mindata[0,2]
+            error = distance(pre_lat, pre_lon, true_lat, true_lon)
+            error_test.append(error)
+    print('>>>>> Epoch{} has finished, error_24h_test is {:.6f}.'.format(epoch+1, sum(error_test)/len(error_test)))
+    print('')
+    
+    distance_train.append(sum(error_train)/len(error_train))
+    distance_test.append(sum(error_test)/len(error_test))
+
+# 误差曲线
+x_axis = list()
+for i in range(epoch_num):
+    x_axis.append(i+1)
+plt.plot(x_axis, distance_train)
+plt.plot(x_axis, distance_test)
+plt.title('LSTM_Model Distance Error-24h')
+plt.xlabel('Epoch')
+plt.ylabel('Distance')
+plt.legend(['Train', 'Test'], loc='upper right')
+plt.xticks(range(1, epoch_num+1, 20))
+plt.show()
