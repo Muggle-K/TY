@@ -1,0 +1,39 @@
+'''数据集和模型'''
+import torch.utils.data as Data
+import torch.nn as nn
+import torch
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# 自定义数据集
+class myDataset(Data.Dataset):
+    
+    def __init__(self, input_data, output_data):
+        self.input_data = input_data
+        self.output_data = output_data
+        
+    def __len__(self):
+        return self.input_data.shape[0]
+    
+    def __getitem__(self, idx):
+        x = self.input_data[idx, :, :]
+        y = self.output_data[idx, :]
+        sample = {'x': x, 'y': y}
+        return sample
+    
+# 自定义模型
+class myModel(nn.Module):
+    def __init__(self, feature_num, hidden_units):
+        super(myModel, self).__init__()
+        self.feature_num = feature_num
+        self.hidden_units = hidden_units
+        self.lstm = nn.LSTM(input_size=self.feature_num, hidden_size=self.hidden_units, num_layers=2, batch_first=True)
+        self.fc = nn.Linear(in_features=self.hidden_units, out_features=2)
+    def forward(self, x):
+        h0 = torch.zeros((2, x.size(0), self.hidden_units), requires_grad=True).to(device)
+        c0 = torch.zeros((2, x.size(0), self.hidden_units), requires_grad=True).to(device)
+        x, (hn, cn) = self.lstm(x, (h0, c0))
+        #lstm输入x:(batch, seq_len, feature),输出x:(batch, seq_len, hidden_size),输出x是lstm最后一层所有时间步的输出
+        #h与c:(num_layers, batch, hidden_size)
+        y = self.fc(x[:, -1, :])
+        return y
